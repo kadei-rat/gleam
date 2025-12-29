@@ -4801,14 +4801,24 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
         return_annotation: Option<TypeAst>,
         location: SrcSpan,
     ) -> TypedExpr {
+        // use function parameter annotations when inferring the call arguments,
+        // which is needed for things like record field access to work
+        let expected_from_annotations: Vec<Option<Arc<Type>>> = arguments
+            .iter()
+            .map(|arg| {
+                arg.annotation
+                    .as_ref()
+                    .and_then(|ann| self.type_from_ast(ann).ok())
+            })
+            .collect_vec();
+
         let typed_call_arguments: Vec<Arc<Type>> = call_arguments
             .iter()
-            .map(|argument| {
-                match self.infer_or_error(argument.value.clone()) {
-                    Ok(argument) => argument,
-                    Err(_e) => self.error_expr(location),
-                }
-                .type_()
+            .enumerate()
+            .map(|(i, argument)| {
+                let expected = expected_from_annotations.get(i).and_then(|t| t.clone());
+                self.infer_call_arg_with_expected(argument.value.clone(), expected, location)
+                    .type_()
             })
             .collect_vec();
         self.infer_fn(
@@ -4819,6 +4829,54 @@ impl<'a, 'b> ExprTyper<'a, 'b> {
             return_annotation,
             location,
         )
+    }
+
+    fn infer_call_arg_with_expected(
+        &mut self,
+        argument: UntypedExpr,
+        expected: Option<Arc<Type>>,
+        location: SrcSpan,
+    ) -> TypedExpr {
+        match (expected.map(collapse_links), argument) {
+            // if we know the expected type is a function and the argument is a
+            // function literal with matching arity, use that information when
+            // inferring the function body
+            (
+                Some(expected_type),
+                UntypedExpr::Fn {
+                    arguments,
+                    body,
+                    return_annotation,
+                    location: fn_location,
+                    kind,
+                    ..
+                },
+            ) => {
+                if let Type::Fn {
+                    arguments: expected_args,
+                    ..
+                } = &*expected_type
+                    && expected_args.len() == arguments.len()
+                {
+                    return self.infer_fn(
+                        arguments,
+                        expected_args,
+                        body,
+                        kind,
+                        return_annotation,
+                        fn_location,
+                    );
+                }
+                // fall through to normal inference if types don't match
+                self.infer_fn(arguments, &[], body, kind, return_annotation, fn_location)
+            }
+
+            // otherwise just perform normal type inference.
+            (_, argument) => match self.infer_or_error(argument) {
+                Ok(argument) => argument,
+                Err(_e) => self.error_expr(location),
+            },
+        }
     }
 
     pub fn do_infer_call_with_known_fun(

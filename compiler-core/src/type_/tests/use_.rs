@@ -493,3 +493,23 @@ use <- x()
 "#
     );
 }
+
+// https://github.com/gleam-lang/gleam/issues/5236
+#[test]
+fn inline_anonymous_function_with_field_access() {
+    assert_module_infer!(
+        r#"
+type Person {
+  Person(name: String)
+}
+
+pub fn get_person() -> String {
+  use person <- fn(next: fn(Person) -> String) -> String {
+    next(Person("lpil"))
+  }
+  person.name
+}
+"#,
+        vec![("get_person", "fn() -> String")],
+    );
+}
